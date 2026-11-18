@@ -1,0 +1,77 @@
+name: Update market data
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # every hour at :17. Change to '*/30 * * * *' for every 30 minutes.
+  workflow_dispatch:        # lets you press "Run workflow" by hand
+
+permissions:
+  contents: write           # saves the collected data to a "data" branch
+  pages: write
+  id-token: write
+
+# Never run two collections at once.
+concurrency:
+  group: market-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore saved data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p state
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data >/dev/null 2>&1; then
+            git clone --quiet --depth 1 --branch data "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" state
+            rm -rf state/.git
+            echo "Restored $(ls state | wc -l) saved files"
+          else
+            echo "No saved data yet, this is the first run"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Copy the website
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          rm -rf _site/data
+
+      - name: Collect market data
+        env:
+          SEARCH_HOST: ${{ vars.SEARCH_HOST }}
+          SEARCH_PORT: ${{ vars.SEARCH_PORT }}
+          TIME_BUDGET_MIN: ${{ vars.TIME_BUDGET_MIN }}
+          REQUEST_DELAY_MS: ${{ vars.REQUEST_DELAY_MS }}
+          RETAIN_DAYS: ${{ vars.RETAIN_DAYS }}
+        run: node scraper/scrape.mjs
+
+      - name: Save data for next time
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd state
+          git init -q -b data
+          git config user.name "market-bot"
+          git config user.email "market-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Data $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

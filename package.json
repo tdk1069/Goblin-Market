@@ -1,0 +1,11 @@
+{
+  "name": "luvlyah-ledger",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test/proto.test.mjs && node test/scrape.test.mjs",
+    "demo": "node tools/make-demo.mjs && python3 -m http.server -d web 8080",
+    "scrape": "node scraper/scrape.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

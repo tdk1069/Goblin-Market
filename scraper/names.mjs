@@ -21,10 +21,11 @@ export function prettyName(raw) {
     .join(' ');
 }
 
-// item_basic columns: itemid, subid, name, sortname, stackSize, flags, aH, ...
+// item_basic columns: itemid, subid, name, sortname, name_jp, type, stackSize, flags, aH, BaseSell
+// type/flags/aH are SQL variables (e.g. @FURNISHING_TYPE, @FLAG_EX | @FLAG_NODELIVERY), not plain numbers.
 export function parseItemBasicSql(text) {
   const out = new Map();
-  const re = /\(\s*(\d+)\s*,\s*-?\d+\s*,\s*'((?:[^'\\]|\\.|'')*)'\s*,\s*'((?:[^'\\]|\\.|'')*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+  const re = /\(\s*(\d+)\s*,\s*-?\d+\s*,\s*'((?:[^'\\]|\\.|'')*)'\s*,\s*'((?:[^'\\]|\\.|'')*)'\s*,\s*'(?:[^'\\]|\\.|'')*'\s*,\s*[^,]+,\s*(\d+)\s*,/g;
   let m;
   while ((m = re.exec(text))) {
     const id = Number(m[1]);

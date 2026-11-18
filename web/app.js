@@ -28,7 +28,7 @@ function parseHash() {
   return { parts: path.split('/').filter(Boolean).map(decodeURIComponent), params: Object.fromEntries(new URLSearchParams(query)) };
 }
 
-const TITLE = 'LuvlyAH Ledger';
+const TITLE = 'Goblin Market';
 function route() {
   const { parts, params } = parseHash();
   const [view = 'overview', arg] = parts;

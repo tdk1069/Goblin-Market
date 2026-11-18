@@ -1,4 +1,4 @@
-# LuvlyAH Ledger
+# Goblin Market
 
 A static website for searching auction house sales: items, stock, buyers, sellers, and a profile page for every character. It is hosted on GitHub Pages and needs no server of your own.
 

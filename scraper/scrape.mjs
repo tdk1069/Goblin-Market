@@ -7,7 +7,7 @@ import { CAT_IDS, catsForSite } from './cats.mjs';
 import { loadNames } from './names.mjs';
 
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
-const HOST = env('SEARCH_HOST', 'play.pheonix-xi.com');
+const HOST = env('SEARCH_HOST', 'play.phoenix-xi.com');
 const PORT = Number(env('SEARCH_PORT', 54002));
 const STATE_DIR = env('STATE_DIR', 'state');
 const OUT_DIR = env('OUT_DIR', '_site');

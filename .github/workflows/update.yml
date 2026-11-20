@@ -1,8 +1,6 @@
 name: Update market data
 
 on:
-  schedule:
-    - cron: '23,53 * * * *'   # every hour at :17. Change to '*/30 * * * *' for every 30 minutes.
   workflow_dispatch:        # lets you press "Run workflow" by hand
 
 permissions:

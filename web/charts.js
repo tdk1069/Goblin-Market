@@ -67,7 +67,10 @@ export function barChart(box, rows, { height = 220, aria = 'Bar chart' } = {}) {
 
 /* -------------------------------- line chart ------------------------------ */
 // points: [{ t, v, tip: () => [nodes], aria }] sorted by time ascending
-export function lineChart(box, points, { height = 260, aria = 'Line chart' } = {}) {
+// trend (optional): [{ t, v }] drawn as a line; the points are then drawn as dots only, and the
+// scale ignores the most extreme 2% of points so one silly sale cannot flatten the chart
+// (those are pinned to the top edge and drawn hollow).
+export function lineChart(box, points, { height = 260, aria = 'Line chart', trend = null } = {}) {
   responsive(box, (W) => {
     const m = { l: 56, r: 18, t: 14, b: 30 }, H = height;
     const pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -75,12 +78,16 @@ export function lineChart(box, points, { height = 260, aria = 'Line chart' } = {
     if (t1 - t0 < 3600) { t0 -= 43200; t1 += 43200; }
     const padT = (t1 - t0) * 0.03; t0 -= padT; t1 += padT;
     const vs = points.map((p) => p.v);
-    let lo = Math.min(...vs), hi = Math.max(...vs);
+    let lo = vs.reduce((a, b) => Math.min(a, b)), hi = vs.reduce((a, b) => Math.max(a, b));
+    if (trend && points.length >= 20) {
+      const sorted = [...vs].sort((a, b) => a - b);
+      hi = Math.max(sorted[Math.floor(sorted.length * 0.98)], ...trend.map((p) => p.v));
+    }
     const pad = lo === hi ? Math.max(1, lo * 0.1) : (hi - lo) * 0.08;
     const ticks = niceTicks(Math.max(0, lo - pad), hi + pad, 4);
     const vMin = ticks[0], vMax = ticks[ticks.length - 1];
     const X = (t) => m.l + ((t - t0) / (t1 - t0)) * pw;
-    const Y = (v) => m.t + ph - ((v - vMin) / (vMax - vMin)) * ph;
+    const Y = (v) => m.t + ph - ((Math.min(v, vMax) - vMin) / (vMax - vMin)) * ph;
     const tl = vMax < 10000 ? fmt : compact;
 
     const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'group', 'aria-label': aria });
@@ -97,10 +104,14 @@ export function lineChart(box, points, { height = 260, aria = 'Line chart' } = {
         : dateShort(t);
       root.append(svg('text', { class: 'tick', x: X(t), y: H - 8, 'text-anchor': 'middle' }, label));
     }
-    if (points.length > 1) {
-      root.append(svg('path', { class: 'line', d: points.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ') }));
+    const path = (pts) => pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ');
+    if (trend) {
+      for (const p of points) root.append(svg('circle', { class: p.v > vMax ? 'dot over' : 'dot', cx: X(p.t), cy: Y(p.v), r: points.length > 300 ? 2.5 : 3.5 }));
+      if (trend.length > 1) root.append(svg('path', { class: 'trend', d: path(trend) }));
+    } else {
+      if (points.length > 1) root.append(svg('path', { class: 'line', d: path(points) }));
+      for (const p of points) root.append(svg('circle', { class: 'dot', cx: X(p.t), cy: Y(p.v), r: 4 }));
     }
-    for (const p of points) root.append(svg('circle', { class: 'dot', cx: X(p.t), cy: Y(p.v), r: 4 }));
 
     const cross = svg('line', { class: 'cross', y1: m.t, y2: m.t + ph, visibility: 'hidden' });
     const ring = svg('circle', { class: 'ring', r: 7, visibility: 'hidden' });
@@ -142,7 +153,7 @@ export function lineChart(box, points, { height = 260, aria = 'Line chart' } = {
 
 /* ------------------------------- chart card ------------------------------- */
 // draw(box) paints the chart into box. columns/rows describe the table version of the same data.
-export function chartCard({ title, sub, controls, draw, columns, rows }) {
+export function chartCard({ title, sub, controls, draw, columns, rows, legend }) {
   const box = h('div', { class: 'chart-box' });
   const tableBox = h('div', { class: 'chart-table', hidden: true },
     h('table', { class: 'plain' },
@@ -160,7 +171,7 @@ export function chartCard({ title, sub, controls, draw, columns, rows }) {
   draw(box);
   return h('section', { class: 'panel chart' },
     h('div', { class: 'chart-head' },
-      h('div', null, h('h2', null, title), sub ? h('p', { class: 'sub' }, sub) : null),
+      h('div', null, h('h2', null, title), sub ? h('p', { class: 'sub' }, sub) : null, legend || null),
       h('div', { class: 'chart-tools' }, controls, toggle)),
     box, tableBox);
 }

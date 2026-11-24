@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { catsForSite } from '../scraper/cats.mjs';
+import { writeSalesFiles, RECENT_HOURS } from '../scraper/pack.mjs';
 
 let seed = 42;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
@@ -62,8 +63,9 @@ const rows = ITEMS.map(([id, name, cat, , stackSize]) => {
 const dir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'web', 'data');
 fs.mkdirSync(dir, { recursive: true });
 const w = (f, o) => fs.writeFileSync(path.join(dir, f), JSON.stringify(o));
-w('sales.json', { cols: ['t', 'id', 'stack', 'price', 'seller', 'buyer'], rows: sales });
+writeSalesFiles(sales, Math.floor(Date.now() / 1000), w);
+try { fs.rmSync(path.join(dir, 'sales.json')); } catch { /* old format file */ }
 w('items.json', { cols: ['id', 'name', 'cat', 'stackSize', 'stockSingle', 'stockStack', 'lastSingle', 'lastSingleT', 'avgSingle', 'lastStack', 'lastStackT', 'avgStack', 'sales7d', 'vol7d'], rows });
 w('cats.json', catsForSite());
-w('meta.json', { updated: new Date(Date.now() - 14 * 60000).toISOString(), host: 'play.example.com', items: rows.length, itemsKnown: rows.length, stockedItems: rows.filter((r) => r[4] || r[5]).length, sales: sales.length, salesArchived: sales.length, retainDays: 90, coverage24h: 412, lookupsTracked: 900, lastRun: { requests: 640, errors: 2, newSales: 31, seconds: 410 }, lastError: null });
+w('meta.json', { updated: new Date(Date.now() - 14 * 60000).toISOString(), host: 'play.example.com', items: rows.length, itemsKnown: rows.length, stockedItems: rows.filter((r) => r[4] || r[5]).length, sales: sales.length, salesArchived: sales.length, retainDays: 90, recentHours: RECENT_HOURS, players: new Set(sales.flatMap((r) => [r[4], r[5]]).filter(Boolean).map((n) => n.toLowerCase())).size, coverage24h: 412, lookupsTracked: 900, lastRun: { requests: 640, errors: 2, newSales: 31, seconds: 410 }, lastError: null });
 console.log(`demo data written to ${dir}: ${sales.length} sales, ${rows.length} items`);

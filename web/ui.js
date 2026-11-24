@@ -37,6 +37,12 @@ export function svg(tag, attrs, ...kids) {
   return el;
 }
 
+/* ------------------------------ searching ------------------------------- */
+
+// Lowercase, no apostrophes or other punctuation, single spaces: "King's Ring" -> "kings ring".
+export const norm = (s) => String(s ?? '').toLowerCase()
+  .replace(/['’`.]/g, '').replace(/[^a-z0-9#+]+/g, ' ').trim();
+
 /* ------------------------------ formatting ------------------------------ */
 
 const NF = new Intl.NumberFormat('en-GB');

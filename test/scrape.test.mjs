@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { startMock } from './mock-server.mjs';
+import { unpackSales } from '../scraper/pack.mjs';
 
 const T = Math.floor(Date.now() / 1000);
 const world = {
@@ -19,6 +20,7 @@ const world = {
     ],
     '4096:0': [{ price: 1200, time: T - 600, seller: 'Dave', buyer: 'Bob' }],
     '4096:1': [{ price: 14000, time: T - 1800, seller: 'Eve', buyer: 'Alice' }],
+    '101:0': [{ price: 300, time: T - 20 * 86400, seller: 'Old', buyer: 'Bob' }],
   },
 };
 const names = { 100: 'Test Dagger', 4096: ['Fire Crystal', 12], 4097: ['Ice Crystal', 12], 4098: ['Wind Crystal', 12], 4099: ['Earth Crystal', 12], 101: ['Bronze Knife', 1] };
@@ -44,11 +46,16 @@ const run = () => new Promise((resolve, reject) => {
 const read = (f) => JSON.parse(fs.readFileSync(path.join(dir, 'out', 'data', f), 'utf8'));
 
 await run();
-let sales = read('sales.json');
-assert.equal(sales.rows.length, 4, 'four sales stored');
-assert.equal(sales.rows[0][0], T - 600, 'newest first');
-const buyers = new Set(sales.rows.map((r) => r[5]));
+const readSales = () => ({ recent: unpackSales(read('sales-recent.json')), older: unpackSales(read('sales-older.json')) });
+let sales = readSales();
+assert.equal(sales.recent.length, 4, 'four recent sales');
+assert.equal(sales.older.length, 1, 'one sale older than a day goes to the older file');
+assert.equal(sales.older[0][4], 'Old');
+assert.equal(sales.recent[0][0], T - 600, 'newest first');
+const buyers = new Set(sales.recent.map((r) => r[5]));
 assert.deepEqual([...buyers].sort(), ['Alice', 'Bob', 'Cara']);
+const recentFile = read('sales-recent.json');
+assert.equal(recentFile.names.filter((n) => n === 'Alice').length, 1, 'each name stored once');
 
 const items = read('items.json');
 const col = (r, n) => r[items.cols.indexOf(n)];
@@ -68,11 +75,17 @@ console.log('history requests first run:', hits.history);
 
 const before = hits.history;
 await run(); // everything was just checked: nothing due, nothing duplicated
-sales = read('sales.json');
-assert.equal(sales.rows.length, 4, 'no duplicates on second run');
+sales = readSales();
+assert.equal(sales.recent.length + sales.older.length, 5, 'no duplicates on second run');
 assert.equal(hits.history, before, 'recent lookups are not repeated');
 const meta = read('meta.json');
-assert.equal(meta.sales, 4);
+assert.equal(meta.sales, 5);
+assert.equal(meta.players, 6);
+assert.equal(meta.recentHours, 24);
+const ov = read('overview.json');
+assert.equal(ov.week.n, 4, 'overview counts the last week only');
+assert.equal(ov.buyers[0][0], 'Alice', 'top buyer by gil');
+assert.equal(ov.n.reduce((a, b) => a + b, 0), 4, 'hourly buckets cover the last 14 days');
 assert.equal(meta.lastError, null);
 
 server.close();

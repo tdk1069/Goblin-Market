@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fetchList, fetchHistory, count } from './proto.mjs';
 import { CAT_IDS, catsForSite } from './cats.mjs';
 import { loadNames } from './names.mjs';
+import { writeSalesFiles, RECENT_HOURS } from './pack.mjs';
 
 const env = (k, d) => (process.env[k] !== undefined && process.env[k] !== '' ? process.env[k] : d);
 const HOST = env('SEARCH_HOST', 'play.phoenix-xi.com');
@@ -192,7 +193,10 @@ writeJson(path.join(dataDir, 'items.json'), {
     'lastSingle', 'lastSingleT', 'avgSingle', 'lastStack', 'lastStackT', 'avgStack', 'sales7d', 'vol7d'],
   rows: itemRows,
 });
-writeJson(path.join(dataDir, 'sales.json'), { cols: ['t', 'id', 'stack', 'price', 'seller', 'buyer'], rows: published });
+// Two files so the site can show the overview before the full history arrives.
+writeSalesFiles(published, now(), (f, o) => writeJson(path.join(dataDir, f), o));
+const players = new Set();
+for (const r of published) { if (r[4]) players.add(r[4].toLowerCase()); if (r[5]) players.add(r[5].toLowerCase()); }
 writeJson(path.join(dataDir, 'cats.json'), catsForSite());
 
 const lookups24h = Object.values(track).filter((t) => t > now() - 86400).length;
@@ -205,6 +209,8 @@ const meta = {
   sales: published.length,
   salesArchived: sales.length,
   retainDays: RETAIN_DAYS,
+  recentHours: RECENT_HOURS,
+  players: players.size,
   coverage24h: lookups24h,
   lookupsTracked: Object.keys(track).length,
   lastRun: { requests: stats.requests, errors: stats.errors, newSales: stats.newSales, seconds: Math.round(elapsed() / 1000) },

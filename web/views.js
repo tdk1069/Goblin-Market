@@ -1,6 +1,7 @@
-import { h, fill, fmt, compact, ago, whenFull, dateShort, dateLong, segmented, select, tip } from './ui.js';
-import { state, qty, cutoff, median, RANGES } from './data.js';
+import { h, fill, fmt, compact, ago, whenFull, dateShort, dateLong, segmented, select, norm } from './ui.js';
+import { state, qty, stackQty, cutoff, median, loadOlder } from './data.js';
 import { barChart, lineChart, chartCard } from './charts.js';
+import { isWatched, toggle as toggleWatch, watchedItems, watchedPlayers, watchCount } from './watch.js';
 
 /* ------------------------------ link helpers ------------------------------ */
 
@@ -13,6 +14,12 @@ const playerLink = (name) => (name ? h('a', { class: 'player-link', href: hrefPl
 const stackBadge = (s) => (s.stack ? h('span', { class: 'badge', title: 'Sold as a full stack' }, `Stack ×${qty(s)}`) : null);
 const catName = (id) => { const c = state.catLabel.get(id); return c ? `${c.group}, ${c.name}` : 'Uncategorised'; };
 
+// "12,000" plus "(1,000 each)" for stacks.
+const each = (price, item) => fmt(price / stackQty(item));
+function priceCell(price, stack, item) {
+  return stack ? [fmt(price), h('span', { class: 'each' }, `${each(price, item)} each`)] : fmt(price);
+}
+
 /* --------------------------------- URL state -------------------------------- */
 
 function writeParams(route, params) {
@@ -23,6 +30,20 @@ function writeParams(route, params) {
 }
 
 const debounce = (fn, ms = 120) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+
+/* ---------------------------- staged data loading --------------------------- */
+
+// Runs fn once the older sales have arrived, if `node` is still on the page by then.
+function afterFull(node, fn) {
+  if (state.complete) return;
+  loadOlder().then(() => { if (node.isConnected) fn(); });
+}
+
+function loadingNote() {
+  if (!state.complete) return h('p', { class: 'loading-note', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), `Showing the last ${state.meta.recentHours || 24} hours while older sales load…`);
+  if (state.olderError) return h('p', { class: 'loading-note warn', role: 'status' }, `Older sales could not be loaded, so only the last ${state.meta.recentHours || 24} hours are shown. Reload the page to try again.`);
+  return null;
+}
 
 /* ------------------------------ shared pieces ------------------------------ */
 
@@ -35,8 +56,24 @@ function empty(title, body) {
   return h('div', { class: 'empty' }, h('h3', null, title), body ? h('p', null, body) : null);
 }
 
-function pageHead(title, sub, crumb) {
-  return h('header', { class: 'page-head' }, crumb || null, h('h1', null, title), sub ? h('p', { class: 'lede' }, sub) : null);
+function pageHead(title, sub, crumb, action) {
+  return h('header', { class: 'page-head' }, crumb || null,
+    h('div', { class: 'title-row' }, h('h1', null, title), action || null),
+    sub ? h('p', { class: 'lede' }, sub) : null);
+}
+
+function starButton(kind, key, what) {
+  const label = (on) => (on ? '★ Watching' : '☆ Watch');
+  const btn = h('button', {
+    type: 'button', class: 'btn-quiet star', 'aria-pressed': String(isWatched(kind, key)),
+    title: `Add ${what} to your watchlist on the overview page (saved in this browser)`,
+    onclick: () => {
+      const on = toggleWatch(kind, key);
+      btn.setAttribute('aria-pressed', String(on));
+      btn.textContent = label(on);
+    },
+  }, label(isWatched(kind, key)));
+  return btn;
 }
 
 // A list of rows with a thin proportional bar under each.
@@ -57,16 +94,33 @@ export function salesTable(rows, { hide = [] } = {}) {
   const cell = {
     when: (s) => h('td', { class: 'when' }, h('time', { title: whenFull(s.t), datetime: new Date(s.t * 1000).toISOString() }, ago(s.t))),
     item: (s) => h('td', { class: 'item' }, itemLink(s.item), ' ', stackBadge(s)),
-    price: (s) => h('td', { class: 'num price' }, fmt(s.price)),
+    price: (s) => h('td', { class: 'num price' }, priceCell(s.price, s.stack, s.item)),
     seller: (s) => h('td', { class: 'seller' }, playerLink(s.seller)),
     buyer: (s) => h('td', { class: 'buyer' }, playerLink(s.buyer)),
   };
-  return h('table', { class: 'sales' },
+  return h('table', { class: 'sales' + (hide.includes('item') ? ' no-item' : '') },
     h('thead', null, h('tr', null, cols.map((c) => h('th', { class: c === 'price' ? 'num' : '' }, label[c])))),
     h('tbody', null, rows.map((s) => h('tr', null, cols.map((c) => cell[c](s))))));
 }
 
+// A sales table that shows `step` rows at a time with a "Show more" button.
+function pagedSales(rows, opts = {}, step = 30) {
+  const box = h('div');
+  let n = step;
+  const draw = () => fill(box,
+    salesTable(rows.slice(0, n), opts),
+    rows.length > n ? h('button', { type: 'button', class: 'btn-quiet more-btn', onclick: () => { n += step * 3; draw(); } }, `Show more (${fmt(rows.length - n)} left)`) : null);
+  draw();
+  return box;
+}
+
 /* ---------------------------------- omnibox --------------------------------- */
+
+// Prefix matches first, then the busiest.
+function rank(list, qn, key, busy) {
+  return list.filter((x) => key(x).includes(qn))
+    .sort((a, b) => (key(b).startsWith(qn) - key(a).startsWith(qn)) || busy(b) - busy(a) || key(a).localeCompare(key(b)));
+}
 
 let omniId = 0;
 export function omnibox({ placeholder, kinds = ['item', 'player', 'sales'], value = '', big = false, autofocus = false, button = 'Search sales' }) {
@@ -81,18 +135,16 @@ export function omnibox({ placeholder, kinds = ['item', 'player', 'sales'], valu
   const go = (o) => { list.hidden = true; if (o) o.go(); };
 
   function compute(q) {
-    const ql = q.trim().toLowerCase();
+    const qn = norm(q);
     opts = [];
-    if (!ql) return;
+    if (!qn) return;
     if (kinds.includes('item')) {
-      const hits = state.items.filter((i) => i.lname.includes(ql))
-        .sort((a, b) => (b.lname.startsWith(ql) - a.lname.startsWith(ql)) || (b.c7 - a.c7) || a.lname.localeCompare(b.lname)).slice(0, 5);
+      const hits = rank(state.items, qn, (i) => i.nname, (i) => i.c7).slice(0, 5);
       if (hits.length) opts.push({ head: 'Items' });
       for (const i of hits) opts.push({ label: i.name, sub: catName(i.cat), go: () => (location.hash = hrefItem(i.id)) });
     }
     if (kinds.includes('player')) {
-      const hits = [...state.players.values()].filter((p) => p.name.toLowerCase().includes(ql))
-        .sort((a, b) => (b.name.toLowerCase().startsWith(ql) - a.name.toLowerCase().startsWith(ql)) || (b.bought.length + b.sold.length) - (a.bought.length + a.sold.length)).slice(0, 5);
+      const hits = rank([...state.players.values()], qn, (p) => p.nname, (p) => p.bought.length + p.sold.length).slice(0, 5);
       if (hits.length) opts.push({ head: 'Characters' });
       for (const p of hits) opts.push({ label: p.name, sub: `${p.bought.length + p.sold.length} sales`, go: () => (location.hash = hrefPlayer(p.name)) });
     }
@@ -133,7 +185,7 @@ export function omnibox({ placeholder, kinds = ['item', 'player', 'sales'], valu
     compute(input.value);
     const sel = selectable();
     if (active >= 0) return go(opts[active]);
-    if (kinds.length === 1 && kinds[0] === 'player') return sel.length ? go(opts[sel[0]]) : input.setCustomValidity('');
+    if (kinds.length === 1 && kinds[0] === 'player') return sel.length ? go(opts[sel[0]]) : null;
     if (kinds.includes('sales') && input.value.trim()) return go(opts[opts.length - 1]);
     if (sel.length) go(opts[sel[0]]);
   } },
@@ -144,13 +196,54 @@ export function omnibox({ placeholder, kinds = ['item', 'player', 'sales'], valu
 
 /* --------------------------------- overview --------------------------------- */
 
+// Sale-like object from an overview row [t, id, stack, price, seller, buyer].
+function saleFromRow(r) {
+  const item = state.itemById.get(r[1]) || { id: r[1], name: `Item #${r[1]}`, stackSize: 1 };
+  return { t: r[0], id: r[1], stack: !!r[2], price: r[3], seller: r[4], buyer: r[5], item };
+}
+
+function watchlistSection() {
+  const box = h('section', { class: 'watchlist' });
+  const draw = () => {
+    const items = watchedItems().map((id) => state.itemById.get(id)).filter(Boolean);
+    const players = watchedPlayers().map((k) => state.players.get(k) || { name: k, missing: true });
+    if (!items.length && !players.length) { fill(box); return; }
+    fill(box,
+      h('div', { class: 'row-between' }, h('h2', null, 'Your watchlist'), h('span', { class: 'muted small' }, 'Saved in this browser. Use ☆ Watch on an item or character page to add more.')),
+      items.length ? h('table', { class: 'sales watch-items' },
+        h('thead', null, h('tr', null, h('th', null, 'Item'), h('th', { class: 'num' }, 'Last sold'), h('th', { class: 'num' }, 'Average of last 5'), h('th', null, 'For sale'), h('th', { class: 'num' }, 'Sold in 7 days'))),
+        h('tbody', null, items.map((i) => {
+          const single = i.lastS || !i.lastK;
+          return h('tr', null,
+            h('td', { class: 'item' }, itemLink(i)),
+            h('td', { class: 'num' }, i.lastS || i.lastK ? [priceCell(single ? i.lastS : i.lastK, !single, i), h('div', { class: 'muted small' }, ago(single ? i.lastST : i.lastKT))] : h('span', { class: 'muted' }, 'No sales')),
+            h('td', { class: 'num' }, i.avgS || i.avgK ? priceCell(i.avgS || i.avgK, !i.avgS, i) : h('span', { class: 'muted' }, '–')),
+            h('td', { class: 'stock' }, stockText(i)),
+            h('td', { class: 'num' }, fmt(i.c7)));
+        }))) : null,
+      players.length ? h('ul', { class: 'watch-players' }, players.map((p) => {
+        const last = p.missing ? null : [...p.bought, ...p.sold].reduce((a, b) => (!a || b.t > a.t ? b : a), null);
+        return h('li', null, playerLink(p.name),
+          last ? h('span', { class: 'muted small' }, `${last.buyer === p.name ? 'bought' : 'sold'} `, itemLink(last.item), ` ${ago(last.t)}`)
+            : h('span', { class: 'muted small' }, state.complete ? 'No trades recorded' : 'Loading…'));
+      })) : null);
+  };
+  draw();
+  if (watchedPlayers().length) afterFull(box, draw);
+  return box;
+}
+
+function stockText(i) {
+  return i.stockS || i.stockK
+    ? [i.stockS ? h('div', null, `${fmt(i.stockS)} ${i.stockS === 1 ? 'single' : 'singles'}`) : null, i.stockK ? h('div', null, `${fmt(i.stockK)} ${i.stockK === 1 ? 'stack' : 'stacks'}`) : null]
+    : h('span', { class: 'muted' }, 'None');
+}
+
 export function overview(root) {
+  const ov = state.overview;
   const now = Date.now() / 1000;
   const day = state.sales.filter((s) => s.t > now - 86400);
-  const week = state.sales.filter((s) => s.t > now - 7 * 86400);
   const gil = (a) => a.reduce((n, s) => n + s.price, 0);
-  const people = new Set();
-  for (const s of week) { if (s.seller) people.add(s.seller.toLowerCase()); if (s.buyer) people.add(s.buyer.toLowerCase()); }
   const listed = state.items.filter((i) => i.stockS > 0 || i.stockK > 0);
 
   root.append(
@@ -160,34 +253,37 @@ export function overview(root) {
       omnibox({ placeholder: 'Search an item, a buyer or a seller', big: true, autofocus: true })),
     statStrip([
       { label: 'Sales in the last day', value: fmt(day.length), sub: `${compact(gil(day))} gil` },
-      { label: 'Gil traded this week', value: compact(gil(week)), sub: `${fmt(week.length)} sales` },
+      { label: 'Gil traded this week', value: compact(ov.week.gil), sub: `${fmt(ov.week.n)} sales` },
       { label: 'Items for sale now', value: fmt(listed.length), sub: `${fmt(listed.reduce((n, i) => n + i.stockS, 0))} singles, ${fmt(listed.reduce((n, i) => n + i.stockK, 0))} stacks` },
-      { label: 'Characters trading this week', value: fmt(people.size), sub: `${state.players.size} seen in ${state.meta.retainDays} days` },
+      { label: 'Characters trading this week', value: fmt(ov.week.people), sub: `${fmt(state.meta.players ?? state.players.size)} seen in ${state.meta.retainDays} days` },
     ]));
 
-  if (!state.sales.length) {
+  if (watchCount()) root.append(watchlistSection());
+
+  if (!ov.week.n && !state.sales.length) {
     root.append(empty('No sales recorded yet', 'The first collection run has not found any sales. Check back after the next scheduled update.'));
     return;
   }
 
-  // Gil traded per day, last 14 local days
+  // Gil traded per local day for the last 14 days, from the hourly totals.
   const days = [];
   for (let i = 13; i >= 0; i--) {
     const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i);
     const start = d.getTime() / 1000;
     days.push({ start, end: start + 86400, value: 0, count: 0 });
   }
-  for (const s of state.sales) {
-    const d = days.find((x) => s.t >= x.start && s.t < x.end);
-    if (d) { d.value += s.price; d.count++; }
-  }
+  ov.gil.forEach((g, i) => {
+    const t = ov.hourStart + i * 3600;
+    const d = days.find((x) => t >= x.start && t < x.end);
+    if (d) { d.value += g; d.count += ov.n[i]; }
+  });
   const dayRows = days.map((d) => ({
     label: dateShort(d.start), value: d.value, count: d.count,
     aria: `${dateShort(d.start)}: ${fmt(d.value)} gil from ${d.count} sales`,
     tip: () => [h('strong', null, `${fmt(d.value)} gil`), h('span', null, new Date(d.start * 1000).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })), h('span', null, `${fmt(d.count)} sales`)],
   }));
 
-  const biggest = [...week].sort((a, b) => b.price - a.price).slice(0, 6);
+  const biggest = ov.biggest.map(saleFromRow);
   root.append(h('div', { class: 'split' },
     chartCard({
       title: 'Gil traded per day', sub: 'Last 14 days, all items',
@@ -203,18 +299,12 @@ export function overview(root) {
           h('div', { class: 'sale-price' }, fmt(s.price), h('div', { class: 'muted small' }, ago(s.t)))))) : empty('No sales this week'))));
 
   const hot = [...state.items].filter((i) => i.v7 > 0).sort((a, b) => b.v7 - a.v7).slice(0, 8);
-  const agg = (key) => {
-    const m = new Map();
-    for (const s of week) { const n = s[key]; if (!n) continue; const r = m.get(n.toLowerCase()) || { name: n, gil: 0, n: 0 }; r.gil += s.price; r.n++; m.set(n.toLowerCase(), r); }
-    return [...m.values()].sort((a, b) => b.gil - a.gil).slice(0, 6);
-  };
+  const people = (rows, verb) => barList(rows.slice(0, 6).map(([name, g, n]) => ({ name: playerLink(name), sub: `${fmt(n)} ${verb}`, value: g, valueText: compact(g) })));
   root.append(h('div', { class: 'cols-3' },
     h('section', null, h('h2', null, 'Busiest items this week'),
-      barList(hot.map((i) => ({ name: h('a', { class: 'item-link', href: hrefItem(i.id) }, i.name), sub: `${fmt(i.c7)} sold`, value: i.v7, valueText: compact(i.v7) })))),
-    h('section', null, h('h2', null, 'Top buyers this week'),
-      barList(agg('buyer').map((p) => ({ name: playerLink(p.name), sub: `${fmt(p.n)} bought`, value: p.gil, valueText: compact(p.gil) })))),
-    h('section', null, h('h2', null, 'Top sellers this week'),
-      barList(agg('seller').map((p) => ({ name: playerLink(p.name), sub: `${fmt(p.n)} sold`, value: p.gil, valueText: compact(p.gil) }))))));
+      barList(hot.map((i) => ({ name: itemLink(i), sub: `${fmt(i.c7)} sold`, value: i.v7, valueText: compact(i.v7) })))),
+    h('section', null, h('h2', null, 'Top buyers this week'), people(ov.buyers, 'bought')),
+    h('section', null, h('h2', null, 'Top sellers this week'), people(ov.sellers, 'sold'))));
 
   root.append(h('section', { class: 'latest' },
     h('div', { class: 'row-between' }, h('h2', null, 'Latest sales'), h('a', { class: 'more', href: '#/sales' }, 'All sales')),
@@ -233,20 +323,20 @@ function moreFilters(...kids) {
 function parseQuery(q) {
   const terms = [];
   const rest = q.replace(/\b(item|buyer|seller|player):("([^"]+)"|(\S+))/gi, (_, f, __, quoted, bare) => {
-    terms.push({ f: f.toLowerCase(), v: (quoted || bare).toLowerCase(), exact: quoted != null });
+    terms.push({ f: f.toLowerCase(), v: norm(quoted || bare), exact: quoted != null });
     return ' ';
   });
-  return { terms, rest: rest.trim().toLowerCase() };
+  return { terms, rest: norm(rest) };
 }
 
 const matcher = (field, v, exact) => {
   const eq = (a) => (exact ? a === v : a.includes(v));
   switch (field) {
-    case 'item': return (s) => eq(s.item.lname);
+    case 'item': return (s) => eq(s.item.nname);
     case 'buyer': return (s) => eq(s.lbuyer);
     case 'seller': return (s) => eq(s.lseller);
     case 'player': return (s) => eq(s.lbuyer) || eq(s.lseller);
-    default: return (s) => eq(s.item.lname) || eq(s.lbuyer) || eq(s.lseller);
+    default: return (s) => eq(s.item.nname) || eq(s.lbuyer) || eq(s.lseller);
   }
 };
 
@@ -278,6 +368,7 @@ export function salesView(root, p) {
     const total = rows.reduce((a, s) => a + s.price, 0);
     const keys = new Set(rows.map((s) => `${s.id}:${s.stack}`));
     fill(results,
+      f.range !== '24h' ? loadingNote() : null,
       h('p', { class: 'summary' },
         h('strong', null, `${fmt(rows.length)} ${rows.length === 1 ? 'sale' : 'sales'}`),
         rows.length ? h('span', null, `${compact(total)} gil in total`) : null,
@@ -306,12 +397,13 @@ export function salesView(root, p) {
         select('Sort', [['new', 'Newest first'], ['old', 'Oldest first'], ['high', 'Highest price'], ['low', 'Lowest price']], f.sort, (v) => { f.sort = v; update(); }))),
     results);
   update();
+  afterFull(results, () => update(false));
 }
 
 /* ----------------------------------- items ---------------------------------- */
 
 export function itemsView(root, p) {
-  const f = { q: p.q || '', cat: p.cat || '', stock: p.stock === '1', sold: p.sold === '1', sort: p.sort || 'name', n: 100 };
+  const f = { q: p.q || '', cat: p.cat || '', stock: p.stock === '1', sold: p.sold === '1', watch: p.watch === '1', sort: p.sort || 'name', n: 100 };
   const results = h('div', { class: 'results', 'aria-live': 'polite' });
   const sorts = {
     name: (a, b) => a.lname.localeCompare(b.lname),
@@ -321,12 +413,14 @@ export function itemsView(root, p) {
   };
   const update = (reset = true) => {
     if (reset) f.n = 100;
-    writeParams('items', { q: f.q, cat: f.cat, stock: f.stock ? '1' : '', sold: f.sold ? '1' : '', sort: f.sort === 'name' ? '' : f.sort });
-    const ql = f.q.trim().toLowerCase(), cat = f.cat ? Number(f.cat) : 0;
-    const rows = state.items.filter((i) => (!ql || i.lname.includes(ql)) && (!cat || i.cat === cat) &&
-      (!f.stock || i.stockS > 0 || i.stockK > 0) && (!f.sold || i.lastS || i.lastK)).sort(sorts[f.sort]);
+    writeParams('items', { q: f.q, cat: f.cat, stock: f.stock ? '1' : '', sold: f.sold ? '1' : '', watch: f.watch ? '1' : '', sort: f.sort === 'name' ? '' : f.sort });
+    const qn = norm(f.q), cat = f.cat ? Number(f.cat) : 0;
+    const watched = new Set(watchedItems());
+    let rows = state.items.filter((i) => (!qn || i.nname.includes(qn)) && (!cat || i.cat === cat) &&
+      (!f.stock || i.stockS > 0 || i.stockK > 0) && (!f.sold || i.lastS || i.lastK) && (!f.watch || watched.has(i.id)));
+    rows = f.sort === 'name' && qn ? rank(rows, qn, (i) => i.nname, () => 0) : rows.sort(sorts[f.sort]);
     const money = (single, stack, i) => (single || stack)
-      ? h('div', null, single ? h('div', null, fmt(single)) : null, stack ? h('div', { class: 'muted small' }, `Stack ×${i.stackSize > 1 ? i.stackSize : 12}: ${fmt(stack)}`) : null)
+      ? h('div', null, single ? h('div', null, fmt(single)) : null, stack ? h('div', { class: 'muted small' }, `Stack ×${stackQty(i)}: ${fmt(stack)} (${each(stack, i)} each)`) : null)
       : h('span', { class: 'muted' }, 'No sales');
     fill(results,
       h('p', { class: 'summary' }, h('strong', null, `${fmt(rows.length)} ${rows.length === 1 ? 'item' : 'items'}`)),
@@ -334,12 +428,10 @@ export function itemsView(root, p) {
         h('thead', null, h('tr', null, h('th', null, 'Item'), h('th', null, 'For sale'), h('th', { class: 'num' }, 'Last sold'), h('th', { class: 'num' }, 'Average of last 5'), h('th', { class: 'num' }, 'Sold in 7 days'))),
         h('tbody', null, rows.slice(0, f.n).map((i) => h('tr', null,
           h('td', { class: 'item' }, itemLink(i), h('div', { class: 'muted small' }, catName(i.cat))),
-          h('td', { class: 'stock' }, i.stockS || i.stockK
-            ? [i.stockS ? h('div', null, `${fmt(i.stockS)} ${i.stockS === 1 ? 'single' : 'singles'}`) : null, i.stockK ? h('div', null, `${fmt(i.stockK)} ${i.stockK === 1 ? 'stack' : 'stacks'}`) : null]
-            : h('span', { class: 'muted' }, 'None')),
+          h('td', { class: 'stock' }, stockText(i)),
           h('td', { class: 'num' }, money(i.lastS, i.lastK, i)),
           h('td', { class: 'num' }, money(i.avgS, i.avgK, i)),
-          h('td', { class: 'num' }, i.c7 ? [h('div', null, fmt(i.c7)), h('div', { class: 'muted small' }, compact(i.v7) + ' gil')] : h('span', { class: 'muted' }, 'None')))))) : empty('No items match', 'Clear a filter or try a different name.'),
+          h('td', { class: 'num' }, i.c7 ? [h('div', null, fmt(i.c7)), h('div', { class: 'muted small' }, compact(i.v7) + ' gil')] : h('span', { class: 'muted' }, 'None')))))) : empty(f.watch && !watched.size ? 'Your watchlist is empty' : 'No items match', f.watch && !watched.size ? 'Open an item and press ☆ Watch to add it.' : 'Clear a filter or try a different name.'),
       rows.length > f.n ? h('button', { type: 'button', class: 'btn-quiet more-btn', onclick: () => { f.n += 200; update(false); } }, `Show more (${fmt(rows.length - f.n)} left)`) : null);
   };
   const typed = debounce(update, 100);
@@ -352,6 +444,7 @@ export function itemsView(root, p) {
       moreFilters(
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: f.stock, onchange: (e) => { f.stock = e.target.checked; update(); } }), 'For sale now'),
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: f.sold, onchange: (e) => { f.sold = e.target.checked; update(); } }), 'Has sold'),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: f.watch, onchange: (e) => { f.watch = e.target.checked; update(); } }), 'Watchlist only'),
         select('Sort', [['name', 'Name'], ['stock', 'Most for sale'], ['price', 'Highest price'], ['week', 'Most gil this week']], f.sort, (v) => { f.sort = v; update(); }))),
     results);
   update();
@@ -359,43 +452,92 @@ export function itemsView(root, p) {
 
 /* ---------------------------------- item page -------------------------------- */
 
-export function itemView(root, id) {
+// Rolling median over the k sales around each point, so one odd sale doesn't move the line much.
+function rollingMedian(rows) {
+  const k = Math.max(3, Math.min(25, Math.round(rows.length / 12)) | 1);
+  const half = k >> 1;
+  return rows.map((s, i) => ({ t: s.t, v: median(rows.slice(Math.max(0, i - half), i + half + 1).map((x) => x.price)) }));
+}
+
+// How many days of history the site holds, capped at `max` (the collector may be newer than that).
+function daysCovered(max) {
+  const oldest = state.sales.length ? state.sales[state.sales.length - 1].t : Date.now() / 1000;
+  return Math.max(1, Math.min(max, (Date.now() / 1000 - oldest) / 86400));
+}
+
+export function itemView(root, id, p = {}) {
   const item = state.itemById.get(Number(id));
   if (!item) { root.append(pageHead('Item not found', null, h('a', { class: 'crumb', href: '#/items' }, 'All items')), empty('No data for that item', 'It has no sales or listings in the current data.')); return; }
   const mine = state.sales.filter((s) => s.id === item.id);
-  const hasStack = mine.some((s) => s.stack), hasSingle = mine.some((s) => !s.stack);
-  let kind = hasSingle || !hasStack ? 'single' : 'stack';
+  const hasStack = mine.some((s) => s.stack) || item.lastK > 0, hasSingle = mine.some((s) => !s.stack) || item.lastS > 0;
+  let kind = p.kind === 'stack' || p.kind === 'single' ? p.kind : hasSingle || !hasStack ? 'single' : 'stack';
+  let range = ['7d', '30d', 'all'].includes(p.range) ? p.range : '30d';
+  const statsHost = h('div');
   const chartHost = h('div', { class: 'chart-host' });
 
   const draw = () => {
-    const rows = mine.filter((s) => s.stack === (kind === 'stack')).sort((a, b) => a.t - b.t);
-    if (!rows.length) { chartHost.replaceChildren(empty('No sales yet', 'This item has not sold in the last ' + state.meta.retainDays + ' days.')); return; }
+    writeParams(`item/${item.id}`, { kind: kind === (hasSingle || !hasStack ? 'single' : 'stack') ? '' : kind, range: range === '30d' ? '' : range });
+    const isStack = kind === 'stack';
+    const ofKind = mine.filter((s) => s.stack === isStack);
+    const since = cutoff(range);
+    const rows = ofKind.filter((s) => s.t >= since).sort((a, b) => a.t - b.t);
+    const prices = rows.map((s) => s.price);
+    const unit = isStack ? stackQty(item) : 1;
+    const per = (v) => (isStack ? `${fmt(v / unit)} each` : null);
+    // Sales rate over the last week (or less, while only part of the history has loaded).
+    const days = daysCovered(7);
+    const soldWeek = ofKind.filter((s) => s.t >= Date.now() / 1000 - 7 * 86400).length;
+    const rate = soldWeek / days;
+    const listed = isStack ? item.stockK : item.stockS;
+    const stockDays = rate > 0 && listed ? listed / rate : 0;
+    const last = ofKind[0] || null; // newest first
+    const rangeText = { '7d': '7 days', '30d': '30 days', all: `${state.meta.retainDays} days` }[range];
+
+    fill(statsHost, statStrip([
+      { label: 'For sale now', value: listed ? `${fmt(listed)} ${isStack ? (listed === 1 ? 'stack' : 'stacks') : (listed === 1 ? 'single' : 'singles')}` : 'None',
+        sub: isStack ? (item.stockS ? `${fmt(item.stockS)} singles too` : null) : (item.stockK ? `${fmt(item.stockK)} stacks too` : null) },
+      { label: 'Last sold', value: last ? fmt(last.price) : 'No sales', sub: last ? [per(last.price), ago(last.t)].filter(Boolean).join(', ') : null },
+      { label: `Median, last ${rangeText}`, value: prices.length ? fmt(median(prices)) : 'No sales',
+        sub: prices.length ? (isStack ? `${per(median(prices))}, ` : '') + `range ${compact(prices.reduce((a, b) => Math.min(a, b)))}–${compact(prices.reduce((a, b) => Math.max(a, b)))}` : null },
+      { label: 'Sells about', value: rate >= 1 ? `${fmt(rate)} a day` : rate * 7 >= 0.5 ? `${fmt(rate * 7)} a week` : 'Rarely',
+        sub: stockDays ? (stockDays < 1 ? 'Less than a day of stock listed' : `${fmt(stockDays)} ${Math.round(stockDays) === 1 ? 'day' : 'days'} of stock listed`)
+          : `${fmt(soldWeek)} sold in the last ${Math.round(days) === 1 ? 'day' : `${Math.round(days)} days`}` },
+    ]));
+
+    const controls = [
+      hasSingle && hasStack ? segmented('Quantity', [['single', 'Single'], ['stack', `Stack ×${unit > 1 ? unit : stackQty(item)}`]], kind, (v) => { kind = v; draw(); }) : null,
+      segmented('Time range', [['7d', '7 days'], ['30d', '30 days'], ['all', 'All']], range, (v) => { range = v; draw(); }),
+    ];
+    if (!rows.length) {
+      fill(chartHost, h('section', { class: 'panel chart' },
+        h('div', { class: 'chart-head' }, h('h2', null, 'Price history'), h('div', { class: 'chart-tools' }, controls)),
+        empty('No sales in this range', state.complete ? 'Try a longer time range.' : 'Older sales are still loading.')));
+      return;
+    }
     const pts = rows.map((s) => ({
       t: s.t, v: s.price,
-      tip: () => [h('strong', null, `${fmt(s.price)} gil`), h('span', null, whenFull(s.t)), h('span', null, `${s.seller || 'Unknown'} sold to ${s.buyer || 'Unknown'}`)],
+      tip: () => [h('strong', null, `${fmt(s.price)} gil`), isStack ? h('span', null, `${fmt(s.price / unit)} each`) : null, h('span', null, whenFull(s.t)), h('span', null, `${s.seller || 'Unknown'} sold to ${s.buyer || 'Unknown'}`)].filter(Boolean),
     }));
-    chartHost.replaceChildren(chartCard({
-      title: kind === 'stack' ? `Price history, stacks of ${qty(rows[0])}` : 'Price history, single items',
-      sub: `${fmt(rows.length)} ${rows.length === 1 ? 'sale' : 'sales'} in the last ${state.meta.retainDays} days`,
-      controls: hasSingle && hasStack ? segmented('Quantity', [['single', 'Single'], ['stack', 'Stack']], kind, (v) => { kind = v; draw(); }) : null,
-      draw: (box) => lineChart(box, pts, { aria: `Sale prices over time for ${item.name}` }),
+    const trend = rows.length >= 5 ? rollingMedian(rows) : null;
+    fill(chartHost, chartCard({
+      title: isStack ? `Price history, stacks of ${unit}` : 'Price history, single items',
+      sub: `${fmt(rows.length)} ${rows.length === 1 ? 'sale' : 'sales'} in the last ${rangeText}`,
+      legend: trend ? h('p', { class: 'legend' }, h('span', { class: 'key-dot', 'aria-hidden': 'true' }), 'Each sale ', h('span', { class: 'key-line', 'aria-hidden': 'true' }), 'Typical price (rolling median)') : null,
+      controls,
+      draw: (box) => lineChart(box, pts, { aria: `Sale prices over time for ${item.name}`, trend }),
       columns: ['When', 'Seller', 'Buyer', 'Price (gil)'],
-      rows: [...rows].reverse().map((s) => [whenFull(s.t), s.seller, s.buyer, fmt(s.price)]),
+      rows: [...rows].reverse().slice(0, 500).map((s) => [whenFull(s.t), s.seller, s.buyer, fmt(s.price)]),
     }));
   };
 
-  const week = mine.filter((s) => s.t > Date.now() / 1000 - 7 * 86400);
-  root.append(
-    pageHead(item.name, catName(item.cat), h('a', { class: 'crumb', href: '#/items' }, 'All items')),
-    statStrip([
-      { label: 'For sale now', value: item.stockS || item.stockK ? `${fmt(item.stockS)} ${item.stockS === 1 ? 'single' : 'singles'}` : 'None', sub: item.stockK ? `${fmt(item.stockK)} ${item.stockK === 1 ? 'stack' : 'stacks'}` : null },
-      { label: 'Last sold', value: item.lastS ? fmt(item.lastS) : item.lastK ? fmt(item.lastK) : 'No sales', sub: item.lastS ? ago(item.lastST) : item.lastK ? `Stack, ${ago(item.lastKT)}` : null },
-      { label: 'Average of last 5', value: item.avgS ? fmt(item.avgS) : item.avgK ? fmt(item.avgK) : 'No sales', sub: item.avgS && item.avgK ? `Stack ${fmt(item.avgK)}` : null },
-      { label: 'Sold in 7 days', value: fmt(week.length), sub: week.length ? `${compact(week.reduce((n, s) => n + s.price, 0))} gil` : null },
-    ]),
+  fill(root,
+    pageHead(item.name, catName(item.cat), h('a', { class: 'crumb', href: '#/items' }, 'All items'), starButton('item', item.id, 'this item')),
+    loadingNote(),
+    statsHost,
     chartHost,
-    h('section', null, h('h2', null, 'Recent sales'), mine.length ? salesTable(mine.slice(0, 30), { hide: ['item'] }) : empty('No sales recorded')));
+    h('section', null, h('h2', null, 'Recent sales'), mine.length ? pagedSales(mine, { hide: ['item'] }) : empty(state.complete ? 'No sales recorded' : 'No sales in the last day', state.complete ? null : 'Older sales are still loading.')));
   draw();
+  afterFull(statsHost, () => { root.replaceChildren(); itemView(root, id, { kind, range }); });
 }
 
 /* ---------------------------------- players ---------------------------------- */
@@ -403,35 +545,56 @@ export function itemView(root, id) {
 export function playersView(root, p) {
   let range = p.range || '7d';
   const boards = h('div', { class: 'cols-2' });
+  const note = h('div');
   const update = () => {
     writeParams('players', { range: range === '7d' ? '' : range });
-    const since = cutoff(range);
-    const agg = (key) => {
-      const m = new Map();
-      for (const s of state.sales) {
-        if (s.t < since || !s[key]) continue;
-        const k = s[key].toLowerCase(), r = m.get(k) || { name: s[key], gil: 0, n: 0 };
-        r.gil += s.price; r.n++; m.set(k, r);
-      }
-      return [...m.values()].sort((a, b) => b.gil - a.gil).slice(0, 15);
-    };
+    let buyers, sellers;
+    if (range === '7d' && state.overview) {
+      // Precomputed by the collector, so this works before older sales load.
+      const conv = (r) => ({ name: r[0], gil: r[1], n: r[2] });
+      buyers = state.overview.buyers.map(conv); sellers = state.overview.sellers.map(conv);
+      fill(note);
+    } else {
+      const since = cutoff(range);
+      const agg = (key) => {
+        const m = new Map();
+        for (const s of state.sales) {
+          if (s.t < since || !s[key]) continue;
+          const k = s[key].toLowerCase(), r = m.get(k) || { name: s[key], gil: 0, n: 0 };
+          r.gil += s.price; r.n++; m.set(k, r);
+        }
+        return [...m.values()].sort((a, b) => b.gil - a.gil).slice(0, 15);
+      };
+      buyers = agg('buyer'); sellers = agg('seller');
+      fill(note, range === '24h' ? null : loadingNote());
+    }
     boards.replaceChildren(
-      h('section', null, h('h2', null, 'Biggest buyers'), barList(agg('buyer').map((r) => ({ name: playerLink(r.name), sub: `${fmt(r.n)} bought`, value: r.gil, valueText: compact(r.gil) + ' gil' })))),
-      h('section', null, h('h2', null, 'Biggest sellers'), barList(agg('seller').map((r) => ({ name: playerLink(r.name), sub: `${fmt(r.n)} sold`, value: r.gil, valueText: compact(r.gil) + ' gil' })))));
+      h('section', null, h('h2', null, 'Biggest buyers'), barList(buyers.map((r) => ({ name: playerLink(r.name), sub: `${fmt(r.n)} bought`, value: r.gil, valueText: compact(r.gil) + ' gil' })))),
+      h('section', null, h('h2', null, 'Biggest sellers'), barList(sellers.map((r) => ({ name: playerLink(r.name), sub: `${fmt(r.n)} sold`, value: r.gil, valueText: compact(r.gil) + ' gil' })))));
   };
   root.append(
     pageHead('Characters', 'Look up a buyer or seller, or see who moved the most gil.'),
     h('div', { class: 'filters' },
       h('div', { class: 'filters-main' }, omnibox({ placeholder: 'Character name', kinds: ['player'], button: 'Find' })),
       h('div', { class: 'filters-more' }, segmented('Time range', [['24h', '24 hours'], ['7d', '7 days'], ['30d', '30 days'], ['all', 'All']], range, (v) => { range = v; update(); }))),
+    note,
     boards);
   update();
+  afterFull(boards, update);
 }
 
 export function playerView(root, name) {
   const pl = state.players.get(name.toLowerCase());
   const back = h('a', { class: 'crumb', href: '#/players' }, 'All characters');
-  if (!pl) { root.append(pageHead(name, null, back), empty('No trades found for this name', 'They have not bought or sold anything in the last ' + state.meta.retainDays + ' days, or the name is spelled differently.')); return; }
+  const rerender = () => { root.replaceChildren(); playerView(root, name); };
+  if (!pl) {
+    const head = pageHead(name, null, back, state.complete ? null : starButton('player', name, 'this character'));
+    root.append(head, state.complete
+      ? empty('No trades found for this name', 'They have not bought or sold anything in the last ' + state.meta.retainDays + ' days, or the name is spelled differently.')
+      : loadingNote());
+    afterFull(head, rerender);
+    return;
+  }
   const all = [...pl.bought, ...pl.sold];
   const first = Math.min(...all.map((s) => s.t)), last = Math.max(...all.map((s) => s.t));
   const biggest = all.reduce((a, b) => (b.price > a.price ? b : a));
@@ -442,10 +605,12 @@ export function playerView(root, name) {
   };
   const section = (title, rows, as, hide) => h('section', null,
     h('div', { class: 'row-between' }, h('h2', null, title), rows.length > 15 ? h('a', { class: 'more', href: hrefSales({ q: `${as}:"${pl.name}"` }) }, `All ${fmt(rows.length)}`) : null),
-    rows.length ? salesTable(rows.slice(0, 15), { hide }) : empty('Nothing yet'));
+    rows.length ? pagedSales(rows, { hide }, 15) : empty('Nothing yet'));
 
-  root.append(
-    pageHead(pl.name, `Seen trading from ${dateLong(first)} to ${dateLong(last)}.`, back),
+  const head = pageHead(pl.name, `Seen trading from ${dateLong(first)} to ${dateLong(last)}.`, back, starButton('player', pl.name, 'this character'));
+  fill(root,
+    head,
+    loadingNote(),
     statStrip([
       { label: 'Bought', value: fmt(pl.bought.length), sub: `${compact(pl.gilBought)} gil spent` },
       { label: 'Sold', value: fmt(pl.sold.length), sub: `${compact(pl.gilSold)} gil earned` },
@@ -457,4 +622,5 @@ export function playerView(root, name) {
       h('section', null, h('h2', null, 'What they sell most'), barList(top(pl.sold)))),
     section('Recent purchases', pl.bought, 'buyer', ['buyer']),
     section('Recent sales', pl.sold, 'seller', ['seller']));
+  afterFull(head, rerender);
 }

@@ -9,7 +9,7 @@ Browsers cannot talk to the game's auction house search service, because it uses
 1. Every hour the Action connects to the search service (the same one the in-game AH menu uses, and the one `searchclient.lua` in LuvlyAH talks to).
 2. It reads stock for every category, then the recent sales for each item, newest-checked-last.
 3. It merges new sales into a running archive, writes JSON files, and publishes the site.
-4. The website loads those JSON files and does all searching in your browser.
+4. The website loads those JSON files and does all searching in your browser. It loads the overview figures and the last 24 hours of sales first (about 100 KB), then the rest of the history in the background (`scraper/pack.mjs` describes the file format).
 
 The archive lives on a branch called `data`, which is rewritten as a single commit each run so the repository stays small. The website only shows the last 90 days.
 
@@ -68,5 +68,7 @@ Node 20 or newer, no packages to install.
 ## Notes
 
 - The protocol code is a port of `searchclient.lua`. It reproduces that file's known-good test vectors byte for byte, but it has not been run against the live server.
+- Searches ignore case, apostrophes and punctuation, so `kings ring` finds King's Ring.
+- The watchlist (☆ Watch on item and character pages) is saved in each visitor's own browser.
 - Search syntax on the Sales page: type a name, or use `buyer:Name`, `seller:Name`, `item:name`, `player:Name`. Put the name in quotes for an exact match, for example `buyer:"Tavaria"`.
 - An unofficial fan tool. Please keep the request delay reasonable; the search service belongs to someone else.

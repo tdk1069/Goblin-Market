@@ -1,4 +1,4 @@
-import { load, state } from './data.js';
+import { load, loadOlder, state } from './data.js';
 import { h, ago } from './ui.js';
 import * as V from './views.js';
 
@@ -36,7 +36,7 @@ function route() {
   main.replaceChildren();
   if (view === 'sales') { V.salesView(main, params); title = 'Sales'; }
   else if (view === 'items') { V.itemsView(main, params); title = 'Items'; }
-  else if (view === 'item' && arg) { V.itemView(main, arg); nav = 'items'; title = state.itemById.get(Number(arg))?.name || 'Item'; }
+  else if (view === 'item' && arg) { V.itemView(main, arg, params); nav = 'items'; title = state.itemById.get(Number(arg))?.name || 'Item'; }
   else if (view === 'players') { V.playersView(main, params); title = 'Characters'; }
   else if (view === 'player' && arg) { V.playerView(main, arg); nav = 'players'; title = arg; }
   else { V.overview(main); nav = 'overview'; }
@@ -75,5 +75,7 @@ async function boot() {
   showFreshness();
   window.addEventListener('hashchange', route);
   route();
+  loadOlder(); // the rest of the history, in the background; views that need it wait for it
+
 }
 boot();

@@ -4,9 +4,7 @@ on:
   workflow_dispatch:        # lets you press "Run workflow" by hand
 
 permissions:
-  contents: write           # saves the collected data to a "data" branch
-  pages: write
-  id-token: write
+  contents: read
 
 # Never run two collections at once.
 concurrency:
@@ -14,12 +12,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: write       # saves the collected data to a "data" branch
     steps:
       - uses: actions/checkout@v4
 
@@ -71,5 +68,26 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
-      - id: deploy
+
+  # Deploy runs as its own job: GitHub's artifact list can lag a moment behind
+  # the upload, and deploying straight after uploading in the same job often
+  # found no artifact. A second attempt after a short wait covers any leftover lag.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy1.outputs.page_url || steps.deploy2.outputs.page_url }}
+    steps:
+      - id: deploy1
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - if: steps.deploy1.outcome == 'failure'
+        run: sleep 30
+      - id: deploy2
+        if: steps.deploy1.outcome == 'failure'
         uses: actions/deploy-pages@v4
